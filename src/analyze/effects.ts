@@ -1,5 +1,6 @@
 import ts from "typescript";
-import { isTypeScriptFile } from "../extract/symbols.js";
+import { isSyntacticSource, scriptKindFor } from "../extract/symbols.js";
+import { table } from "../lookup.js";
 import { makeFact, MAX_EVIDENCE } from "./fact.js";
 import type {
   AnalysisContext,
@@ -43,12 +44,12 @@ export interface EffectSite {
  */
 
 /** Bare global calls that are effectful. */
-const GLOBAL_CALLS: Record<string, EffectKind> = {
+const GLOBAL_CALLS: Record<string, EffectKind> = table({
   fetch: "network",
-};
+});
 
 /** `object.member` patterns, matched on the object name. */
-const OBJECT_EFFECTS: Record<string, EffectKind> = {
+const OBJECT_EFFECTS: Record<string, EffectKind> = table({
   fs: "filesystem",
   fsPromises: "filesystem",
   axios: "network",
@@ -59,15 +60,15 @@ const OBJECT_EFFECTS: Record<string, EffectKind> = {
   prisma: "database",
   knex: "database",
   pool: "database",
-};
+});
 
 /** Fully-qualified `object.member` patterns that beat the object-name table. */
-const QUALIFIED_EFFECTS: Record<string, EffectKind> = {
+const QUALIFIED_EFFECTS: Record<string, EffectKind> = table({
   "process.env": "env",
   "process.exit": "process",
   "Date.now": "timing",
   "Math.random": "timing",
-};
+});
 
 function qualifiedName(node: ts.PropertyAccessExpression): string | null {
   const left = node.expression;
@@ -85,7 +86,7 @@ function qualifiedName(node: ts.PropertyAccessExpression): string | null {
  * `fs/promises` needs its own entry precisely because `fs` would not
  * cover it.
  */
-const MODULE_EFFECTS: Record<string, EffectKind> = {
+const MODULE_EFFECTS: Record<string, EffectKind> = table({
   fs: "filesystem",
   "fs/promises": "filesystem",
   http: "network",
@@ -107,7 +108,7 @@ const MODULE_EFFECTS: Record<string, EffectKind> = {
   mongodb: "database",
   ioredis: "database",
   redis: "database",
-};
+});
 
 function moduleEffect(specifier: string): EffectKind | undefined {
   const s = specifier.replace(/^node:/, "");
@@ -152,14 +153,14 @@ function importBindings(sf: ts.SourceFile): Map<string, EffectKind> {
 
 /** Effect sites in a file, in source order. Syntactic — no type checker. */
 export function detectEffects(path: string, text: string): EffectSite[] {
-  if (!isTypeScriptFile(path)) return [];
+  if (!isSyntacticSource(path)) return [];
 
   const sf = ts.createSourceFile(
     path,
     text,
     ts.ScriptTarget.ES2022,
     true,
-    path.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+    scriptKindFor(path),
   );
   const lines = text.split("\n");
   const sites: EffectSite[] = [];
@@ -262,7 +263,11 @@ export const effectsAnalyzer: Analyzer = async (
   const facts: Fact[] = [];
 
   for (const file of changeset.files) {
-    if (!isTypeScriptFile(file.path)) continue;
+    if (!isSyntacticSource(file.path)) continue;
+    // A file marked generated is machine-written JavaScript (see
+    // `ChangedFile.generated`); whatever it calls arrived compiled in, not
+    // introduced by this change, so it is not evidence of anything.
+    if (file.generated) continue;
 
     const beforePath = file.previousPath ?? file.path;
     const beforeText =

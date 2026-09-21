@@ -191,7 +191,7 @@ describe("renderTerminal", () => {
     };
     const out = renderTerminal(model(withDeletion, []));
     expect(out).toContain("gone.ts");
-    expect(out).toContain("1 deleted TypeScript file");
+    expect(out).toContain("1 deleted source file");
     expect(out).toContain("exports, callers, and guards are not analyzed");
     // `effectsAnalyzer` does read the before side of a deletion, so the note
     // must not tell the reader that nothing describes the file.
@@ -199,12 +199,12 @@ describe("renderTerminal", () => {
   });
 
   it("says nothing about deleted files when none were deleted, and ignores a non-TypeScript deletion", () => {
-    expect(renderTerminal(model(changeset, []))).not.toContain("deleted TypeScript");
+    expect(renderTerminal(model(changeset, []))).not.toContain("deleted source");
     const deletedMarkdown: Changeset = {
       ...changeset,
       files: [{ path: "notes.md", status: "deleted", hunks: [], symbols: [] }],
     };
-    expect(renderTerminal(model(deletedMarkdown, []))).not.toContain("deleted TypeScript");
+    expect(renderTerminal(model(deletedMarkdown, []))).not.toContain("deleted source");
   });
 
   it("says so plainly when nothing was found", () => {
@@ -374,7 +374,8 @@ describe("renderTerminal concealing characters", () => {
   it("never splits a surrogate pair at the excerpt truncation boundary", () => {
     // An astral character straddling the code-unit cut left a lone surrogate
     // that renders as U+FFFD. Truncation counts code points now, so the
-    // 55th point — the first emoji — survives whole ahead of the ellipsis.
+    // point just past the truncation cap — the first emoji — survives whole
+    // ahead of the ellipsis.
     const excerpt = "x".repeat(54) + "\u{1F600}\u{1F600}\u{1F600}";
     const out = renderTerminal(
       model(changeset, [finding({ evidence: [{ file: "a.ts", line: 3, excerpt }] })]),

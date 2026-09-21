@@ -8,6 +8,7 @@ import {
   SETTER_FRAME_PREFIX,
 } from "../../src/extract/scope.js";
 import {
+  bandOfKind,
   MAX_RENDERED_SIGNATURE,
   minPossibleAnalyzerScore,
   rank,
@@ -53,6 +54,20 @@ describe("scoreFact", () => {
     expect(isFinite(score)).toBe(true);
     expect(typeof score).toBe("number");
   });
+
+  it("weights a dependency map named after an inherited member as an unknown map", () => {
+    // The map multiplier is read with `detail.map`. A nullish fallback does not
+    // catch an inherited member, so the multiplier became a function and the
+    // score NaN — which does not merely read wrong, it unsorts the report,
+    // since every comparison against NaN is false. Unreachable from the
+    // analyzers today, and pinned here because that is a property of the
+    // callers rather than of this function.
+    for (const map of ["toString", "constructor", "valueOf"]) {
+      const score = scoreFact(fact({ kind: "dependency_changed", detail: { map, name: "x" } }));
+      expect(Number.isNaN(score)).toBe(false);
+      expect(isFinite(score)).toBe(true);
+    }
+  });
 });
 
 describe("tierFor", () => {
@@ -62,6 +77,24 @@ describe("tierFor", () => {
 });
 
 describe("toFinding", () => {
+  it("names a scope segment that Object.prototype also answers to", () => {
+    // Every class constructor is a scope segment called `constructor`, so this
+    // needed no unusual code at all: the label table returned the inherited
+    // function and the title read "removed from function Object() { [native
+    // code] } in Account", on the highest-weighted kind this tool emits.
+    // Methods named toString or valueOf did the same.
+    // Three distinct inherited names, so a fix that special-cased `constructor`
+    // alone would still fail here.
+    for (const symbol of ["Account.constructor", "Bar.toString", "Baz.valueOf"]) {
+      const f = toFinding(
+        fact({ kind: "guard_removed", detail: { guard: "throw", symbol }, qualifiedSymbol: symbol }),
+      );
+      expect(f.title).toBe(`a throw guard was removed from ${symbol}`);
+      expect(f.title).not.toContain("native code");
+      expect(f.body).not.toContain("native code");
+    }
+  });
+
   it("writes a readable title naming the effect, leaving location to the renderer", () => {
     const f = toFinding(fact());
     expect(f.title).toBe("introduces a network effect");
@@ -889,5 +922,220 @@ describe("reach never buries a defect", () => {
       fact({ id: "many", kind: "blast_radius", detail: { symbol: "b", references: 67 } }),
     ]);
     expect(findings.map((f) => f.id)).toEqual(["many", "few"]);
+  });
+});
+
+describe("dependency findings", () => {
+  const dep = (kind: Fact["kind"], detail: Record<string, unknown>): Fact =>
+    fact({
+      id: `${kind}:package.json:${String(detail.map)}:${String(detail.name)}`,
+      kind,
+      file: "package.json",
+      line: 12,
+      detail,
+      evidence: [{ file: "package.json", line: 12, excerpt: '"left-pad": "^1.3.0"' }],
+    });
+
+  it("says what each dependency finding means, in the spec's copy", () => {
+    const added = toFinding(
+      dep("dependency_added", { map: "dependencies", name: "left-pad", to: "^1.3.0" }),
+    );
+    expect(added.title).toBe("adds left-pad to dependencies");
+    expect(added.body).toContain("now declares `left-pad` (`^1.3.0`) in `dependencies`");
+    // The runtime clause appears for runtime maps only.
+    expect(added.body).toContain("install scripts run whether or not anything imports it");
+
+    const devAdded = toFinding(
+      dep("dependency_added", { map: "devDependencies", name: "eslint", to: "^9.0.0" }),
+    );
+    expect(devAdded.body).not.toContain("install scripts run");
+
+    const removed = toFinding(
+      dep("dependency_removed", { map: "dependencies", name: "left-pad", from: "^1.3.0" }),
+    );
+    expect(removed.title).toBe("removes left-pad from dependencies");
+    expect(removed.body).toContain("no longer declares");
+
+    const changed = toFinding(
+      dep("dependency_changed", {
+        map: "dependencies",
+        name: "typescript",
+        from: "^5.0.0",
+        to: "^6.0.0",
+      }),
+    );
+    expect(changed.title).toBe("changes typescript in dependencies: ^5.0.0 → ^6.0.0");
+    expect(changed.body).toContain("the lockfile decides what actually resolves");
+  });
+
+  it("ranks a runtime addition above the same addition in devDependencies", () => {
+    // Through rank, not by reading weights — the multiplier only matters if
+    // the sort feels it. `rank` returns Finding[], which carries no `detail`;
+    // the map is recovered from the id, where it is a segment.
+    const runtime = dep("dependency_added", { map: "dependencies", name: "a", to: "^1.0.0" });
+    const dev = dep("dependency_added", { map: "devDependencies", name: "b", to: "^1.0.0" });
+    const ranked = rank([dev, runtime]);
+    expect(ranked[0].id).toContain(":dependencies:");
+  });
+});
+
+describe("lockfile findings", () => {
+  const fact = (kind: Fact["kind"], detail: Record<string, unknown>): Fact => ({
+    id: `${kind}:package-lock.json`,
+    kind,
+    file: "package-lock.json",
+    line: 1,
+    detail,
+    evidence: [{ file: "package-lock.json", line: 1, excerpt: "x" }],
+  });
+
+  it("ranks an out-of-sync lockfile above every manifest dependency kind", () => {
+    const outOfSync = scoreFact(
+      fact("lockfile_out_of_sync", { map: "dependencies", name: "a", manifest: "^2.0.0", lock: "^1.0.0" }),
+    );
+    expect(outOfSync).toBeGreaterThan(
+      scoreFact(fact("dependency_added", { map: "dependencies", name: "a", to: "^1.0.0" })),
+    );
+    expect(outOfSync).toBeLessThan(WEIGHTS.factKind.export_removed);
+  });
+
+  it("halves a resolved change in a dev map, which needs detail.map to work at all", () => {
+    const dev = fact("dependency_resolved_changed", {
+      map: "devDependencies", name: "a", from: "1.0.0", to: "1.1.0", range: "^1.0.0", rangeChanged: false,
+    });
+    const runtime = fact("dependency_resolved_changed", {
+      map: "dependencies", name: "a", from: "1.0.0", to: "1.1.0", range: "^1.0.0", rangeChanged: false,
+    });
+    expect(scoreFact(dev)).toBe(scoreFact(runtime) / 2);
+  });
+
+  it("log-scales tree churn on total movement, not arrivals alone", () => {
+    const arrivals = scoreFact(fact("lockfile_tree_changed", { entered: 40, left: 0, moved: 0 }));
+    const departures = scoreFact(fact("lockfile_tree_changed", { entered: 0, left: 40, moved: 0 }));
+    expect(departures).toBe(arrivals);
+    expect(scoreFact(fact("lockfile_tree_changed", { entered: 1, left: 0, moved: 0 }))).toBeLessThan(arrivals);
+  });
+
+  it("never lets tree churn outrank a kind that reports a problem", () => {
+    const huge = scoreFact(fact("lockfile_tree_changed", { entered: 5000, left: 5000, moved: 5000 }));
+    expect(huge).toBeLessThanOrEqual(WEIGHTS.factKind.effect_added);
+  });
+
+  it("sorts tree churn into the context band and the other three into the defect band", () => {
+    expect(bandOfKind("lockfile_tree_changed")).toBe(bandOfKind("blast_radius"));
+    expect(bandOfKind("lockfile_out_of_sync")).toBe(bandOfKind("dependency_changed"));
+    expect(bandOfKind("lockfile_version_stale")).toBe(bandOfKind("dependency_changed"));
+    expect(bandOfKind("dependency_resolved_changed")).toBe(bandOfKind("dependency_changed"));
+  });
+
+  it("leaves the analyzer floor where it was, so MODEL_CEILING does not move", () => {
+    expect(minPossibleAnalyzerScore()).toBe(6);
+  });
+});
+
+describe("lockfile finding copy", () => {
+  const fact = (kind: Fact["kind"], detail: Record<string, unknown>): Fact => ({
+    id: `${kind}:package-lock.json`,
+    kind,
+    file: "package-lock.json",
+    line: 1,
+    detail,
+    evidence: [{ file: "package-lock.json", line: 1, excerpt: "x" }],
+  });
+
+  it("states all three tree-churn counts in the title, not the old two-count form", () => {
+    const f = toFinding(fact("lockfile_tree_changed", { entered: 0, left: 0, moved: 500 }));
+    expect(f.title).toContain("0 in");
+    expect(f.title).toContain("0 out");
+    expect(f.title).toContain("500 changed");
+    // The pre-fix title named only entered/left, so an all-zero-but-moved
+    // shape — the one a plain `npm update` produces — read "0 in, 0 out"
+    // while carrying most of the score. Pinned as the exact string a
+    // regression would reproduce.
+    expect(f.title).not.toBe("the dependency tree moved: 0 in, 0 out");
+  });
+
+  it("pluralizes each tree-churn count on its own, singular only at exactly one", () => {
+    // The floor shape minPossibleAnalyzerScore names as producible, so this
+    // is the one that must stay right. At the two zero positions a correct
+    // ternary and a hardcoded plural render identically ("0 packages"), so
+    // this shape alone cannot prove either the left or the moved ternary is
+    // still there — see the two tests below, which put every position at a
+    // value where singular and plural actually differ.
+    const f = toFinding(fact("lockfile_tree_changed", { entered: 1, left: 0, moved: 0 }));
+    expect(f.body).toContain("1 package entered the tree");
+    expect(f.body).toContain("0 packages left");
+    expect(f.body).toContain("0 packages changed version");
+  });
+
+  it("reads singular in every position when every count is one", () => {
+    const f = toFinding(fact("lockfile_tree_changed", { entered: 1, left: 1, moved: 1 }));
+    expect(f.body).toContain(
+      "1 package entered the tree, 1 package left, and 1 package changed version.",
+    );
+  });
+
+  it("reads plural in every position when every count is more than one", () => {
+    const f = toFinding(fact("lockfile_tree_changed", { entered: 2, left: 2, moved: 2 }));
+    expect(f.body).toContain(
+      "2 packages entered the tree, 2 packages left, and 2 packages changed version.",
+    );
+  });
+
+  it("names both sides of the disagreement when the lockfile has an entry", () => {
+    const f = toFinding(
+      fact("lockfile_out_of_sync", {
+        map: "dependencies", name: "left-pad", manifest: "^2.0.0", lock: "^1.0.0",
+      }),
+    );
+    expect(f.body).toContain("package.json declares `^2.0.0`");
+    expect(f.body).toContain("the lockfile records `^1.0.0`");
+  });
+
+  it("says the lockfile has no entry for it when lock is absent", () => {
+    const f = toFinding(
+      fact("lockfile_out_of_sync", {
+        map: "dependencies", name: "left-pad", manifest: "^2.0.0", lock: null,
+      }),
+    );
+    expect(f.body).toContain("the lockfile has no entry for it");
+  });
+
+  it("leads with the unchanged range only when rangeChanged is false", () => {
+    const unchanged = toFinding(
+      fact("dependency_resolved_changed", {
+        name: "left-pad", from: "1.0.0", to: "1.1.0", range: "^1.0.0", rangeChanged: false,
+      }),
+    );
+    expect(unchanged.body).toContain("The declared range `^1.0.0` did not change; the version");
+
+    const changed = toFinding(
+      fact("dependency_resolved_changed", {
+        name: "left-pad", from: "1.0.0", to: "1.1.0", range: "^1.0.0", rangeChanged: true,
+      }),
+    );
+    expect(changed.body).not.toContain("did not change");
+    expect(changed.body.startsWith("The version")).toBe(true);
+  });
+
+  it("states the lockfile's role rather than predicting an install outcome that a sibling lockfile_out_of_sync finding can falsify", () => {
+    // The old closing sentence, "This is what installs.", is false whenever
+    // a lockfile_out_of_sync finding is also present in the same review:
+    // npm ci then refuses to install at all. The replacement states a role,
+    // not an outcome, so it stays true in that same review.
+    const f = toFinding(
+      fact("dependency_resolved_changed", {
+        name: "left-pad", from: "1.0.0", to: "1.1.0", range: "^1.0.0", rangeChanged: false,
+      }),
+    );
+    expect(f.body).toContain("The lockfile, not the declared range, is what an install follows.");
+    expect(f.body).not.toContain("This is what installs");
+  });
+
+  it("says what a stale lockfile version field means", () => {
+    const f = toFinding(fact("lockfile_version_stale", { manifest: "2.0.0", lock: "1.0.0" }));
+    expect(f.title).toBe("package-lock.json still says 1.0.0");
+    expect(f.body).toContain("package.json declares version `2.0.0`");
+    expect(f.body).toContain("the lockfile was not regenerated");
   });
 });

@@ -300,7 +300,7 @@ function effectsLens(findings: FindingView[]): string {
     section("Guards", "Checks that ran before and do not run now.", guards, "guards"),
     section("Contracts", "Promises other code was compiled against.", contracts, "contracts"),
   ].filter((p) => p !== "");
-  // Names all three kinds of finding this lens does not show. It used to name
+  // Names all four kinds of finding this lens does not show. It used to name
   // only the first, while the model classifies a standalone reach finding
   // under a subject no section filters on — so a reader was told the
   // narrative held nothing extra except model claims, and it held that too.
@@ -310,7 +310,7 @@ function effectsLens(findings: FindingView[]): string {
   // from prose, and the baseline-less path deliberately claims nothing about
   // what the pointer used to do — so the clause names both sources and states
   // only that the pointer does not hold now.
-  const note = `<p class="blurb">Built from what the analyzers proved, and not the whole list. A model-only claim has no analyzer behind it to classify. A standalone reach finding — a changed export with callers, and nothing else known about it — reports cost rather than a problem, and belongs to none of these three. A citation finding — a line of prose or a comment in this repository whose pointer into the code does not hold at this revision — belongs to none of them either. All three appear in the narrative.</p>`;
+  const note = `<p class="blurb">Built from what the analyzers proved, and not the whole list. A model-only claim has no analyzer behind it to classify. A standalone reach finding — a changed export with callers, and nothing else known about it — reports cost rather than a problem, and belongs to none of these three. A citation finding — a line of prose or a comment in this repository whose pointer into the code does not hold at this revision — belongs to none of them either. A dependency finding — a change to what package.json declares, or to what package-lock.json resolves — belongs to none of them either. All four appear in the narrative.</p>`;
   if (parts.length === 0) {
     // Describes the filter, not the change. A lens is a view over findings
     // the model classified by id prefix, and if that classification ever
@@ -450,7 +450,7 @@ function headerHtml(m: ReportModel): string {
 
   // Its own line, deliberately outside the banner — the model carries this
   // as `coverageNote`, apart from `notes`, for exactly this placement:
-  // deleting a TypeScript file is routine, and "This review is partial."
+  // deleting a source file is routine, and "This review is partial."
   // fired on every diff that did. A banner that a normal change trips is a
   // banner a reader learns to skip, and the things it exists for — a dead
   // analyzer, a model never asked — are the ones that would go unread.
@@ -458,6 +458,10 @@ function headerHtml(m: ReportModel): string {
   // Same line treatment and the same reasoning as `coverage` above: what the
   // analyzers could not reach is coverage, not a partial review.
   const unanalyzed = m.unanalyzedNote ? `<p class="coverage">${esc(m.unanalyzedNote)}</p>` : "";
+  // Same line treatment again: a machine-written file urtext declined to
+  // read is coverage too, not a shortfall in a run that covered everything
+  // it could.
+  const generated = m.generatedNote ? `<p class="coverage">${esc(m.generatedNote)}</p>` : "";
 
   // Inside the header, so it spans the three lens panes rather than sitting in
   // one of them — it indexes findings across all three. Below the legend for
@@ -503,6 +507,7 @@ function headerHtml(m: ReportModel): string {
     provenance,
     coverage,
     unanalyzed,
+    generated,
     banner,
     filterNote,
     distributionNote,

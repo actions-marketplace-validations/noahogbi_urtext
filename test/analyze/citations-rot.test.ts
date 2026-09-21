@@ -494,6 +494,14 @@ describe("degradation", () => {
     expect(swept[0].baseline).toBeUndefined();
   });
 
+  // The one test here that needs more than the global ceiling. It spends the
+  // whole MAX_BASELINE_READS budget on purpose, and every distinct pair inside
+  // it is its own `git show` subprocess — spawns that cost far more on Windows
+  // than the reads they perform. Run alone it finishes well inside the ceiling;
+  // under full-suite parallelism the contention for process creation pushes it
+  // past. Raising the global timeout instead would make a genuine hang in every
+  // other suite take proportionally longer to surface, so the exception lives
+  // here, beside the thing that earns it.
   it("falls back to existence-only checking once the historical-read budget is spent, still claiming no commit", async () => {
     // Driven over the real edge rather than asserted about: the refusal path
     // is where the baseline-read note's promise — "checked only for whether
@@ -527,7 +535,7 @@ describe("degradation", () => {
     expect(rots[0].citingLine).toBe(MAX_BASELINE_READS + 1);
     expect(rots[0].baseline).toBeUndefined();
     expect(notes).toEqual([baselineReadsCappedNote(1)]);
-  });
+  }, 180_000);
 });
 
 describe("blame", () => {
@@ -1043,5 +1051,40 @@ describe("excluding paths from a sweep", () => {
       onNote: (n) => notes.push(n),
     });
     expect(notes.some((n) => /exclud/i.test(n))).toBe(false);
+  });
+});
+
+describe("a single-line JavaScript file is not a citation candidate", () => {
+  it("drops a machine-written file even though it cites a real drift", async () => {
+    // `bundle.js` cites `src/target.ts:1` accurately when both are first
+    // committed; the second commit drifts the target's content but leaves
+    // the citing line untouched, so `git blame` still attributes it to the
+    // first commit — a real, resolvable baseline, not an uncommitted line
+    // the analyzer would skip for an unrelated reason. If this file were
+    // scanned, that citation would rot for real: this proves it is not
+    // scanned at all, which is `ChangedFile.generated`'s job.
+    const repo = makeRepo("urtext-citations-generated-");
+    write(repo, "src/target.ts", ["export const LIMIT = 1;"]);
+    write(repo, "bundle.js", [
+      "// see src/target.ts:1 " + "x".repeat(500),
+      "const version = 1;",
+    ]);
+    commit(repo, "first");
+    write(repo, "src/target.ts", ["export const LIMIT = 99;"]);
+    // A second, unrelated line changes so the file counts as touched in this
+    // diff — the citing first line is untouched, so blame still finds it in
+    // the first commit above.
+    write(repo, "bundle.js", [
+      "// see src/target.ts:1 " + "x".repeat(500),
+      "const version = 2;",
+    ]);
+    commit(repo, "drift the target, touch the bundle elsewhere");
+
+    const cs = await extract(repo, "HEAD^..HEAD");
+    const bundle = cs.files.find((f) => f.path === "bundle.js");
+    expect(bundle?.generated).toBe(true);
+
+    const facts = await makeCitationsAnalyzer()(cs, createContext(repo, cs.range));
+    expect(facts.some((f) => f.evidence.some((e) => e.file === "bundle.js"))).toBe(false);
   });
 });

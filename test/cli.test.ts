@@ -616,23 +616,23 @@ describe("review", () => {
 
     const r = await review(delRepo, { command: "review", json: false, noLlm: true, help: false });
     expect(r.output).toContain("doomed.ts");
-    expect(r.output).toContain("deleted TypeScript file");
+    expect(r.output).toContain("deleted source file");
     // The finding the old wording told the reader to disregard.
     expect(r.output).toContain("no longer has a network effect");
     expect(r.output).not.toContain("every analyzer skips");
     const html = readFileSync(r.reportPath!, "utf8");
     expect(html).toContain("doomed.ts");
-    expect(html).toContain("1 deleted TypeScript file: doomed.ts");
+    expect(html).toContain("1 deleted source file: doomed.ts");
     // Routine, so it does not escalate the whole review to partial: the
     // banner here holds the `--no-llm` skip reason and nothing else.
     const banner = html.slice(html.indexOf(`<div class="banner">`));
-    expect(banner.slice(0, banner.indexOf("</div>"))).not.toContain("deleted TypeScript");
+    expect(banner.slice(0, banner.indexOf("</div>"))).not.toContain("deleted source");
 
     // And the surface that cannot read prose. A script had no way to see this
     // gap at all, which made "stated the same way on every surface" false.
     const json = await review(delRepo, { command: "review", json: true, noLlm: true, help: false });
     const parsed = JSON.parse(json.output);
-    expect(parsed.coverage.deletedTypeScriptFiles).toEqual(["doomed.ts"]);
+    expect(parsed.coverage.deletedSourceFiles).toEqual(["doomed.ts"]);
     expect(parsed.coverage.note).toContain("doomed.ts");
   });
 
@@ -640,7 +640,7 @@ describe("review", () => {
     // Always present, so a consumer reads it without branching on the key.
     const r = await review(repo, { command: "review", json: true, noLlm: true, help: false });
     const parsed = JSON.parse(r.output);
-    expect(parsed.coverage.deletedTypeScriptFiles).toEqual([]);
+    expect(parsed.coverage.deletedSourceFiles).toEqual([]);
     expect(parsed.coverage.note).toBeUndefined();
   });
 
@@ -733,6 +733,126 @@ describe("review", () => {
     // A --no-llm run makes no claims, so nothing is marked — but the key is
     // present so a consumer reads it without branching.
     expect(parsed.intentGap).toEqual([]);
+  });
+
+  it("says a manifest could not be read, and keeps the other manifest's facts", async () => {
+    // One unparseable manifest must not discard the facts the other one
+    // produced, and must not brand the review partial: the analyzer notes
+    // it and continues.
+    const twoPkg = mkCanonicalTempDir("urtext-cli-manifests-");
+    const run = (args: string[]) => gitIn(twoPkg, args);
+    run(["init", "-b", "main"]);
+    run(["config", "user.email", "test@example.com"]);
+    run(["config", "user.name", "Test"]);
+    mkdirSync(join(twoPkg, "pkgs", "a"), { recursive: true });
+    mkdirSync(join(twoPkg, "pkgs", "b"), { recursive: true });
+    writeFileSync(
+      join(twoPkg, "pkgs", "a", "package.json"),
+      JSON.stringify({ name: "a", version: "1.0.0" }, null, 2),
+    );
+    writeFileSync(
+      join(twoPkg, "pkgs", "b", "package.json"),
+      JSON.stringify({ name: "b", version: "1.0.0" }, null, 2),
+    );
+    run(["add", "-A"]);
+    run(["commit", "-m", "first"]);
+    writeFileSync(join(twoPkg, "pkgs", "a", "package.json"), "{ mid-merge nonsense");
+    writeFileSync(
+      join(twoPkg, "pkgs", "b", "package.json"),
+      JSON.stringify(
+        { name: "b", version: "1.0.0", dependencies: { "left-pad": "^1.3.0" } },
+        null,
+        2,
+      ),
+    );
+
+    const r = await review(twoPkg, { command: "review", json: true, noLlm: true, help: false });
+    const parsed = JSON.parse(r.output);
+    expect(
+      parsed.warnings.some((w: string) => w.includes("did not parse")),
+    ).toBe(true);
+    expect(
+      parsed.findings.some((f: Finding) =>
+        f.id.startsWith("dependency_added:pkgs/b/package.json:"),
+      ),
+    ).toBe(true);
+  });
+
+  it("carries the lockfile's missing-root-entry note through review() into --json's warnings, beside a real finding on the same file", async () => {
+    // The missing-root-entry disclosure end to end: a legacy lockfile with
+    // no packages[""] root entry still produces a real, non-model finding (the stale root
+    // version below), which is exactly what removes a file from
+    // `coverage.unanalyzedFiles` — so without this note reaching `warnings`
+    // through `review()`'s own wiring, a reader sees a lockfile finding and
+    // no hint that the out-of-sync check never ran against it.
+    const lockRepo = mkCanonicalTempDir("urtext-cli-lockfile-");
+    const run = (args: string[]) => gitIn(lockRepo, args);
+    run(["init", "-b", "main"]);
+    run(["config", "user.email", "test@example.com"]);
+    run(["config", "user.name", "Test"]);
+    writeFileSync(
+      join(lockRepo, "package.json"),
+      JSON.stringify({ name: "p", version: "1.0.0", dependencies: { a: "^1.0.0" } }, null, 2),
+    );
+    // Written before the `packages` map existed: a `dependencies` map of
+    // resolved objects at the document root, no `packages` key at all — the
+    // same legacy shape `test/analyze/lockfile.test.ts`'s `mkLegacyLock`
+    // builds for the pure-core tests.
+    writeFileSync(
+      join(lockRepo, "package-lock.json"),
+      JSON.stringify(
+        {
+          name: "p",
+          version: "1.0.0",
+          lockfileVersion: 1,
+          dependencies: { a: { version: "1.0.0", resolved: "https://example.invalid/a", integrity: "sha-fake-a" } },
+        },
+        null,
+        2,
+      ),
+    );
+    run(["add", "-A"]);
+    run(["commit", "-m", "first"]);
+    // The manifest's version moves, so the lockfile's own root version field
+    // goes stale against it — a real finding. And the lockfile file itself
+    // changes too (dependency b joins both), so it appears in the diff at
+    // all; an untouched lockfile is not a file `review()` reads.
+    writeFileSync(
+      join(lockRepo, "package.json"),
+      JSON.stringify(
+        { name: "p", version: "2.0.0", dependencies: { a: "^1.0.0", b: "^1.0.0" } },
+        null,
+        2,
+      ),
+    );
+    writeFileSync(
+      join(lockRepo, "package-lock.json"),
+      JSON.stringify(
+        {
+          name: "p",
+          version: "1.0.0",
+          lockfileVersion: 1,
+          dependencies: {
+            a: { version: "1.0.0", resolved: "https://example.invalid/a", integrity: "sha-fake-a" },
+            b: { version: "1.0.0", resolved: "https://example.invalid/b", integrity: "sha-fake-b" },
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    const r = await review(lockRepo, { command: "review", json: true, noLlm: true, help: false });
+    const parsed = JSON.parse(r.output);
+    expect(parsed.warnings).toContain(
+      "package-lock.json has no root package entry, so its dependencies were not checked against package.json.",
+    );
+    expect(
+      parsed.findings.some((f: Finding) => f.id === "lockfile_version_stale:package-lock.json"),
+    ).toBe(true);
+    // The premise the comment above states: a real finding is what makes the
+    // disclosure necessary in the first place, not merely possible.
+    expect(parsed.coverage.unanalyzedFiles).not.toContain("package-lock.json");
   });
 
   it("reports an empty unanalyzed list when every changed file is TypeScript", async () => {

@@ -3,6 +3,10 @@ import { fileURLToPath } from "node:url";
 import {
   ANALYZERS,
   citationsAnalyzer,
+  dependencyAnalyzer,
+  lockfileAnalyzer,
+  makeDependencyAnalyzer,
+  makeLockfileAnalyzer,
   makeCitationsAnalyzer,
   runAnalyzers,
 } from "./analyze/index.js";
@@ -11,7 +15,9 @@ import { collectIntent } from "./extract/intent.js";
 import { DEFAULT_MODEL, interpret } from "./interpret/index.js";
 import {
   deletedFilesNote,
-  deletedTypeScriptFiles,
+  deletedSourceFiles,
+  generatedFiles,
+  generatedFilesNote,
   unanalyzedFiles,
   unanalyzedFilesNote,
 } from "./report/coverage.js";
@@ -401,7 +407,16 @@ export async function review(
           exclude: opts.citationsExclude ?? [],
           onNote: (note) => warnings.push(note),
         })
-      : a,
+      : // The same swap for the same reason: a manifest that does not parse
+        // becomes one warnings line instead of a failed analyzer.
+        a === dependencyAnalyzer
+        ? makeDependencyAnalyzer({ onNote: (note) => warnings.push(note) })
+        : // Same swap again: a lockfile that does not parse, or carries no
+          // root package entry to check the manifest against, becomes a
+          // warnings line instead of a failed analyzer or unstated silence.
+          a === lockfileAnalyzer
+          ? makeLockfileAnalyzer({ onNote: (note) => warnings.push(note) })
+          : a,
   );
   let failureCount = 0;
   const facts = await runAnalyzers(changeset, ctx, runnable, (f) => {
@@ -634,13 +649,19 @@ export async function review(
     // surface" false and left the one consumer that cannot read prose blind to
     // the gap. The array is always present so a consumer can test it without
     // branching on the key; the sentence is there only when there is one.
-    const deleted = deletedTypeScriptFiles(changeset);
+    const deleted = deletedSourceFiles(changeset);
     // The other half of the same disclosure, and the half the human surfaces
     // gained first: which changed files no analyzer reported on at all. A
     // script reading this could otherwise not tell a clean file from one
     // urtext has no analyzer for, which is the distinction that decides
     // whether a model-only finding about it is worth anything.
     const unanalyzed = unanalyzedFiles(changeset, findings);
+    // A third disclosure, same rule as the two above: always an array, a
+    // sentence only when it is non-empty. See `ChangedFile.generated` for
+    // what puts a file in this list — no analyzer reported on it — and
+    // `generatedFiles`'s own doc comment for why `findings` is passed here
+    // too: a generated file can still be a citation finding's cited target.
+    const generated = generatedFiles(changeset, findings);
     return {
       output: JSON.stringify(
         {
@@ -666,7 +687,7 @@ export async function review(
           untrackedCount: changeset.untrackedCount ?? 0,
           warnings,
           coverage: {
-            deletedTypeScriptFiles: deleted,
+            deletedSourceFiles: deleted,
             ...(deleted.length > 0 ? { note: deletedFilesNote(deleted) } : {}),
             // Always present, empty included, by the same rule as the array
             // above it; the sentence only when there is one.
@@ -674,6 +695,8 @@ export async function review(
             ...(unanalyzed.length > 0
               ? { unanalyzedNote: unanalyzedFilesNote(unanalyzed, changeset.files.length) }
               : {}),
+            generatedFiles: generated,
+            ...(generated.length > 0 ? { generatedNote: generatedFilesNote(generated) } : {}),
           },
           // What each kind of finding means, once per kind. This text used to
           // close every body of its kind, and `findings` above carries bodies

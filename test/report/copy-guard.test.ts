@@ -66,6 +66,68 @@ const findings: Finding[] = [
     beyondIntent: true,
   },
   {
+    // A dependency finding with the longest body (runtime map), so the new
+    // titles, bodies, and the shared kind note render on every surface the
+    // guard scans — the guard is total over copy only if the fixture
+    // produces it.
+    id: "dependency_added:package.json:dependencies:left-pad",
+    tier: "verified",
+    file: "package.json",
+    line: 12,
+    title: "adds left-pad to dependencies",
+    body: "package.json now declares `left-pad` (`^1.3.0`) in `dependencies`. A runtime dependency installs for every consumer; its install scripts run whether or not anything imports it.",
+    score: 55,
+    evidence: [{ file: "package.json", line: 12, excerpt: '"left-pad": "^1.3.0"' }],
+  },
+  // One finding per lockfile kind, each composed by `toFinding` rather than
+  // hand-typed, so this surface is checked against the copy the scorer
+  // actually produces: the guard is total over copy only if the fixture
+  // produces it, and the lockfile kinds arrived after this fixture was last
+  // extended for exactly this reason.
+  toFinding({
+    id: "lockfile_out_of_sync:package-lock.json:dependencies:left-pad",
+    kind: "lockfile_out_of_sync",
+    file: "package-lock.json",
+    line: 12,
+    detail: { map: "dependencies", name: "left-pad", manifest: "^2.0.0", lock: "^1.0.0" },
+    evidence: [
+      { file: "package-lock.json", line: 12, excerpt: '"left-pad": { "version": "1.0.0" }' },
+    ],
+  }),
+  toFinding({
+    id: "dependency_resolved_changed:package-lock.json:dependencies:left-pad",
+    kind: "dependency_resolved_changed",
+    file: "package-lock.json",
+    line: 13,
+    detail: {
+      map: "dependencies",
+      name: "left-pad",
+      from: "1.3.0",
+      to: "1.3.1",
+      range: "^1.3.0",
+      rangeChanged: false,
+    },
+    evidence: [
+      { file: "package-lock.json", line: 13, excerpt: '"version": "1.3.1"' },
+    ],
+  }),
+  toFinding({
+    id: "lockfile_version_stale:package.json:package-lock.json",
+    kind: "lockfile_version_stale",
+    file: "package.json",
+    line: 2,
+    detail: { manifest: "2.0.0", lock: "1.0.0" },
+    evidence: [{ file: "package.json", line: 2, excerpt: '"version": "2.0.0"' }],
+  }),
+  toFinding({
+    id: "lockfile_tree_changed:package-lock.json",
+    kind: "lockfile_tree_changed",
+    file: "package-lock.json",
+    line: 1,
+    detail: { entered: 3, left: 1, moved: 2 },
+    evidence: [{ file: "package-lock.json", line: 1, excerpt: '"lockfileVersion": 3' }],
+  }),
+  {
     id: "claim:0:c1",
     tier: "model",
     file: "a.ts",
@@ -252,7 +314,12 @@ describe("coverage disclosures reach every surface", () => {
       range: { from: "abc123", to: WORKTREE, label: "vs origin/main" },
       files: [
         { path: "a.ts", status: "modified", hunks: [], symbols: [] },
-        { path: "package.json", status: "modified", hunks: [], symbols: [] },
+        // Not package.json: the fixture now carries a verified dependency
+        // finding anchored there, and the unanalyzed-files rule correctly
+        // drops a file an analyzer reported on — which would empty the very
+        // note this test pins across surfaces. A workflow file is what no
+        // analyzer reports on.
+        { path: "ci.yml", status: "modified", hunks: [], symbols: [] },
       ],
     },
     findings,
@@ -265,6 +332,31 @@ describe("coverage disclosures reach every surface", () => {
       expect(
         scannable(rendered).includes(scannable(mixed.unanalyzedNote ?? "")),
         `${name} omits the unanalyzed-files disclosure`,
+      ).toBe(true);
+    }
+  });
+
+  // The same drift, one note later: `generatedNote` reached `ReportModel`
+  // and `--json`, but no renderer read it until this fixture caught it —
+  // the guard is total over copy only if the fixture produces the copy.
+  const withGenerated = buildReportModel(
+    {
+      range: { from: "abc123", to: WORKTREE, label: "vs origin/main" },
+      files: [
+        { path: "a.ts", status: "modified", hunks: [], symbols: [] },
+        { path: "bundle.js", status: "added", hunks: [], symbols: [], generated: true },
+      ],
+    },
+    findings,
+    meta,
+  );
+
+  it("states which file was skipped as machine-written, identically on all four", async () => {
+    expect(withGenerated.generatedNote).toBeDefined();
+    for (const [name, rendered] of await surfaces(withGenerated)) {
+      expect(
+        scannable(rendered).includes(scannable(withGenerated.generatedNote ?? "")),
+        `${name} omits the generated-file disclosure`,
       ).toBe(true);
     }
   });

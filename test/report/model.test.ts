@@ -13,6 +13,7 @@ import { renderHtml } from "../../src/report/html.js";
 import { renderMarkdown } from "../../src/report/markdown.js";
 import { renderTerminal } from "../../src/report/terminal.js";
 import { makeFact } from "../../src/analyze/fact.js";
+import { mapSymbols } from "../../src/extract/symbols.js";
 import { reconcile } from "../../src/score/reconcile.js";
 import {
   WORKTREE,
@@ -331,6 +332,25 @@ describe("buildReportModel surface symbols", () => {
     expect(plainText(m.surfaceSymbols[0].kind)).toBe("function");
     expect(plainText(m.surfaceSymbols[0].file)).toBe("a.ts");
     expect(m.surfaceSymbols[0].change).toBe("modified");
+  });
+
+  it("carries a JavaScript file's exported symbol, not just TypeScript's", () => {
+    // Goes through the real `mapSymbols`, the producer this task changed,
+    // rather than a hand-built symbol literal — the fixtures above already
+    // show `surfaceSymbols` has no extension filter of its own; what needed
+    // covering is that a real JavaScript symbol actually reaches it.
+    const path = "a.mjs";
+    const after = "export function send(a) {\n  return a;\n}\n";
+    const hunk = [{ oldStart: 0, oldLines: 0, newStart: 1, newLines: 3 }];
+    const cs = changeset({
+      files: [
+        { path, status: "added", hunks: hunk, symbols: mapSymbols(path, null, after, hunk) },
+      ],
+    });
+    const m = buildReportModel(cs, [], { warnings: [] });
+    expect(m.surfaceSymbols).toHaveLength(1);
+    expect(plainText(m.surfaceSymbols[0].qualifiedName)).toBe("send");
+    expect(plainText(m.surfaceSymbols[0].file)).toBe("a.mjs");
   });
 
   it("leaves an unexported declaration out, as the symbol table always has", () => {
@@ -1077,5 +1097,148 @@ describe("buildReportModel intent-gap index", () => {
     expect(new Set(ids).size).toBe(ids.length);
     expect(m.findings).toHaveLength(3);
     for (const id of ids) expect(m.findings.some((f) => f.id === id)).toBe(true);
+  });
+});
+
+describe("dependency routing", () => {
+  it("routes dependency findings to the narrative lens under the dependency subject", () => {
+    const m = buildReportModel(
+      changeset(),
+      [
+        finding({
+          id: "dependency_added:package.json:dependencies:left-pad",
+          tier: "verified",
+          file: "package.json",
+        }),
+      ],
+      { warnings: [] },
+    );
+    expect(m.findings[0].lens).toBe("narrative");
+    expect(m.findings[0].subject).toBe("dependency");
+  });
+});
+
+describe("dependency kind notes", () => {
+  it("states the manifest-versus-lockfile note once for any mix of dependency kinds", () => {
+    // The note is shared by three kinds; a kind-keyed dedup would print it
+    // once per kind present.
+    const m = buildReportModel(
+      changeset(),
+      [
+        finding({
+          id: "dependency_added:package.json:dependencies:a",
+          tier: "verified",
+          file: "package.json",
+        }),
+        finding({
+          id: "dependency_removed:package.json:dependencies:b",
+          tier: "verified",
+          file: "package.json",
+        }),
+      ],
+      { warnings: [] },
+    );
+    const depNotes = m.kindNotes.filter((n) => n.includes("lockfile decides"));
+    expect(depNotes).toHaveLength(1);
+  });
+});
+
+describe("lockfile kind notes", () => {
+  it("prints the shared lockfile note once across several lockfile kinds", () => {
+    // The note is shared by four kinds; a kind-keyed dedup would print it
+    // once per kind present.
+    const m = buildReportModel(
+      changeset(),
+      [
+        finding({
+          id: "lockfile_out_of_sync:package-lock.json:dependencies:a",
+          tier: "verified",
+          file: "package-lock.json",
+        }),
+        finding({
+          id: "lockfile_tree_changed:package-lock.json",
+          tier: "verified",
+          file: "package-lock.json",
+        }),
+      ],
+      { warnings: [] },
+    );
+    expect(m.kindNotes.filter((n) => n.startsWith("Lockfile findings"))).toHaveLength(1);
+  });
+
+  // The test above only ever mixes two of the four kinds LOCKFILE_NOTE is
+  // keyed under, in one review — enough to prove the note dedupes, not
+  // enough to prove all four mappings still exist. Deleting
+  // `lockfile_version_stale: LOCKFILE_NOTE` from `KIND_NOTES` left the whole
+  // suite green until these four were added: each finding here appears
+  // alone, with no sibling finding of a different lockfile kind present to
+  // supply the note in its place, so dropping any one kind's mapping
+  // silences the note in exactly the test for that kind.
+  it("states the shared lockfile note for a lockfile_out_of_sync finding on its own", () => {
+    const m = buildReportModel(
+      changeset(),
+      [
+        finding({
+          id: "lockfile_out_of_sync:package-lock.json:dependencies:a",
+          tier: "verified",
+          file: "package-lock.json",
+        }),
+      ],
+      { warnings: [] },
+    );
+    expect(m.kindNotes).toEqual([
+      "Lockfile findings report what package-lock.json records, which is not always what package.json declares.",
+    ]);
+  });
+
+  it("states the shared lockfile note for a dependency_resolved_changed finding on its own", () => {
+    const m = buildReportModel(
+      changeset(),
+      [
+        finding({
+          id: "dependency_resolved_changed:package-lock.json:a",
+          tier: "verified",
+          file: "package-lock.json",
+        }),
+      ],
+      { warnings: [] },
+    );
+    expect(m.kindNotes).toEqual([
+      "Lockfile findings report what package-lock.json records, which is not always what package.json declares.",
+    ]);
+  });
+
+  it("states the shared lockfile note for a lockfile_version_stale finding on its own", () => {
+    const m = buildReportModel(
+      changeset(),
+      [
+        finding({
+          id: "lockfile_version_stale:package-lock.json",
+          tier: "verified",
+          file: "package-lock.json",
+        }),
+      ],
+      { warnings: [] },
+    );
+    expect(m.kindNotes).toEqual([
+      "Lockfile findings report what package-lock.json records, which is not always what package.json declares.",
+    ]);
+  });
+
+  it("states the shared lockfile note for a lockfile_tree_changed finding on its own", () => {
+    const m = buildReportModel(
+      changeset(),
+      [
+        finding({
+          id: "lockfile_tree_changed:package-lock.json",
+          tier: "verified",
+          file: "package-lock.json",
+        }),
+      ],
+      { warnings: [] },
+    );
+    expect(m.kindNotes).toEqual([
+      "Lockfile findings report what package-lock.json records, which is not always what package.json declares.",
+    ]);
   });
 });

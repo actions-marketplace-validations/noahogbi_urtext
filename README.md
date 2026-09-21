@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/noahogbi/urtext/actions/workflows/ci.yml/badge.svg)](https://github.com/noahogbi/urtext/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/urtext)](https://www.npmjs.com/package/urtext)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/noahogbi/urtext/badge)](https://scorecard.dev/viewer/?uri=github.com/noahogbi/urtext)
+[![OpenSSF Scorecard](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.scorecard.dev%2Fprojects%2Fgithub.com%2Fnoahogbi%2Furtext&query=%24.score&label=openssf%20scorecard)](https://scorecard.dev/viewer/?uri=github.com/noahogbi/urtext)
 
 **A diff reviewer that shows its evidence.** Point `urtext` at a git range and it reports what
 changed and why it matters — ranked, and with every claim labeled by the kind of evidence behind
@@ -23,18 +23,25 @@ matters — ranked, with every claim labeled by the kind of evidence behind it:
 - `inferred` — a model claim that analysis corroborates but does not prove
 - `model` — a model claim nothing mechanical confirms
 
-**It analyses TypeScript.** The four code analyzers below read the TypeScript compiler,
-so they fire on `.ts`, `.tsx`, `.mts` and `.cts`. Point urtext at a Python, Go or Rust
-repository and the code analyzers find nothing; the citations analyzer still checks prose
-in `.md` and `.txt`, which is a fifth of the tool. That is a limit, not a roadmap item.
+**It analyses TypeScript projects, including the JavaScript in them.** Guards, effects, and
+citations read `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.mjs`, `.cjs` and `.jsx` without
+consulting the project's tsconfig at all. Surface and blast radius read the same TypeScript
+extensions always, and the JavaScript ones only when the project's own compiler options
+admit them — both need the type checker, not just a file they can parse on their own. Point
+urtext at a Python, Go or Rust repository and the code analyzers find nothing; the citations
+analyzer still checks prose in `.md` and `.txt`, and the dependencies and lockfile analyzers
+still read `package.json` and `package-lock.json` — three of the seven. That is a limit, not
+a roadmap item.
 
 **And every review says where that limit fell.** A report names the changed files no
 analyzer reported on — a `package.json`, a workflow YAML, a SQL migration — so silence
 about a file is never mistaken for a clean bill of health. It claims non-reporting, not
 non-reading, and it says plainly that anything the report does say about those files came
-from the model alone.
+from the model alone. A report also names any changed file whose shape says a tool wrote
+it — a bundle, a generated client — and says the same of it: no analyzer reported on it,
+because code a build produced is not something a person wrote for a reviewer to read.
 
-Five analyzers run over the change:
+Seven analyzers run over the change:
 
 - **guards** — conditionals, early returns, and throws removed from code that survived
 - **surface** — exports added, removed, or changed shape
@@ -42,6 +49,12 @@ Five analyzers run over the change:
 - **effects** — network, filesystem, process, env, database, and timing effects appearing or disappearing
 - **citations** — prose that cites code by `path:line` or by a quoted phrase, where the citation resolved
   when its line was last written and no longer resolves now
+- **dependencies** — `package.json` entries added, removed, or version-changed, in any of the
+  four dependency maps; declared constraints only, since within a range the lockfile decides
+  what actually resolves
+- **lockfile** — `package-lock.json` against `package.json` and against its own previous state:
+  a lockfile the manifest disagrees with, a resolved version that moved, a stale root version,
+  and a count of how the transitive tree changed
 
 Findings are ranked. A `verified` or `inferred` finding carries the evidence
 behind it — file, line, and the quoted source. A `model` finding carries none
@@ -345,3 +358,11 @@ and first committed to version control August 15, 2026. In August 2026 it was
 re-aimed at the problem that had become the real bottleneck: reviewing
 AI-written diffs rather than authoring code in an IR. The prototype lives in
 `archive/prototype/`.
+
+## Contributing
+
+Bug reports, and especially a review that stated something it could not
+support, are welcome: [open an issue](https://github.com/noahogbi/urtext/issues).
+For a vulnerability, use the private channel in [SECURITY.md](SECURITY.md)
+instead. [CONTRIBUTING.md](CONTRIBUTING.md) covers the process, what CI
+enforces, and the test policy.

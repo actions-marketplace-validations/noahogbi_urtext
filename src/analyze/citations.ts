@@ -1,6 +1,6 @@
 import ts from "typescript";
 import { git } from "../extract/git.js";
-import { isTypeScriptFile } from "../extract/symbols.js";
+import { isSyntacticSource } from "../extract/symbols.js";
 import {
   REPORT_DIR,
   WORKTREE,
@@ -60,12 +60,23 @@ export const PROSE_EXTENSIONS = [".md", ".markdown", ".txt"] as const;
 
 /**
  * The pathspecs the candidate-file queries in this file's scan half pass to
- * git. Narrower than `isTypeScriptFile` accepts — it also takes the
- * module-explicit extensions, which no pathspec here names — so a citation
- * written in one of those files is not checked at all. An under-report, the
- * direction every approximation in this feature leans.
+ * git: prose, plus every extension `isSyntacticSource` treats as source. The
+ * two lists must stay in step — it was exactly this pair drifting apart that
+ * let a module-explicit citation go unchecked before.
  */
-export const CITATION_PATHSPECS = ["*.md", "*.markdown", "*.txt", "*.ts", "*.tsx"] as const;
+export const CITATION_PATHSPECS = [
+  "*.md",
+  "*.markdown",
+  "*.txt",
+  "*.ts",
+  "*.tsx",
+  "*.mts",
+  "*.cts",
+  "*.js",
+  "*.mjs",
+  "*.cjs",
+  "*.jsx",
+] as const;
 
 export type CitationForm = "line" | "quote";
 
@@ -284,7 +295,18 @@ function commentSpans(source: string, fileName: string): CommentSpan[] {
 
   const visit = (node: ts.Node): void => {
     const children = node.getChildren(sourceFile);
-    if (children.length === 0) {
+    // The end-of-file token is the one token that can have children: a JSDoc
+    // block that precedes nothing else is hung off it as its child. Treating
+    // it as a leaf anyway is what asks it for its leading comments.
+    // Descending instead reaches the JSDoc node, whose position is the
+    // block's own opener — and a leading-comment scan that starts past the
+    // beginning of the file collects nothing until it has crossed a line
+    // break. So the block itself, and every comment between the last
+    // statement and it, went unscanned, while whatever followed the block
+    // was read. Found by the planted-citation property, and pinned:
+    // see `test/analyze/citations.test.ts`, "finds a JSDoc block that ends
+    // the file after its last statement".
+    if (children.length === 0 || node.kind === ts.SyntaxKind.EndOfFileToken) {
       record(ts.getLeadingCommentRanges(source, node.getFullStart()));
       record(ts.getTrailingCommentRanges(source, node.getEnd()));
       return;
@@ -364,7 +386,7 @@ export function citationsInComments(source: string, fileName: string): Citation[
 /** Every citation in one file, scanned the way that file's kind is scanned. */
 export function citationsIn(path: string, text: string): Citation[] {
   if (isProseFile(path)) return citationsInProse(text);
-  if (isTypeScriptFile(path)) return citationsInComments(text, path);
+  if (isSyntacticSource(path)) return citationsInComments(text, path);
   return [];
 }
 
@@ -738,14 +760,24 @@ export async function findCitationRot(
   // notice they mistyped one, and it is only trustworthy if the note never
   // fires for a filter that changed no result.
   const exclude = options.sweep ? (options.exclude ?? []) : [];
-  const candidates = options.sweep
+  const rawCandidates = options.sweep
     ? await sweepCandidates(cwd, exclude)
     : await touchedCandidates(cwd, now, touched);
   if (exclude.length > 0) {
     const unfiltered = await sweepCandidates(cwd);
-    const dropped = unfiltered.length - candidates.length;
+    const dropped = unfiltered.length - rawCandidates.length;
     if (dropped > 0) note?.(citationsExcludedNote(exclude, dropped));
   }
+  // Machine-written JavaScript in the reviewed changeset (see
+  // `ChangedFile.generated`) is dropped from the candidate list itself,
+  // after the exclude-note comparison above so a generated file is never
+  // misreported as something `--citations-exclude` removed. A bundle's
+  // comments, if it has any past its long first line, are not prose anyone
+  // wrote to point at this repository.
+  const generatedPaths = new Set(
+    changeset.files.filter((f) => f.generated).map((f) => f.path),
+  );
+  const candidates = rawCandidates.filter((path) => !generatedPaths.has(path));
   if (candidates.length === 0) return [];
 
   const scanned = candidates.slice(0, MAX_CITING_FILES);

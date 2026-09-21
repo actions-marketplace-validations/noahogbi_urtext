@@ -3,6 +3,154 @@
 Notable changes to urtext. Versions follow [semantic versioning](https://semver.org/);
 dates are the release date.
 
+## 0.5.2 — 2026-09-09
+
+### Fixed
+
+- **A JSDoc block that ended a file went unchecked, and so did the comments before it.** The
+  citations analyzer walks the syntax tree to its leaves and reads the comments around each.
+  A JSDoc block that precedes nothing but the end of the file is attached to the end-of-file
+  token as that token's child, which made the token not a leaf; the walk went to the JSDoc
+  node instead, and a comment scan started at a JSDoc's own position collects nothing before
+  the first line break. So the block, and any line or block comment between the last
+  statement and it, was never read — a stale `path:line` there was not reported — while
+  whatever followed the block was. A file that ended in a plain comment instead was always
+  read, and so was a JSDoc block anywhere else. The test that holds this repository's own
+  comments to their tuning constants used the same walk and had the same blind spot; no
+  comment in the repository sat in it.
+- **A lockfile out-of-sync finding could point at the wrong line.** When a manifest declares
+  a name under one of the four dependency maps and the lockfile's root package entry carries
+  that map as a string rather than an object, the map reads as empty, the name is reported as
+  missing from the lockfile, and the finding is anchored below that map. The line lookup,
+  asked for a path continuing below a value that opens no block, answered with a same-named
+  key from whichever block opened next — the next map's entry. It now returns nothing there,
+  and the finding falls back to the map's own line.
+
+### Changed
+
+- The citation and manifest parsers are now also tested by property: generated prose,
+  comments and pretty-printed JSON whose expected result is known before the parser sees
+  them, a few hundred cases per run, shrunk and pinned as fixtures when one fails. Both
+  defects above were found that way.
+
+## 0.5.1 — 2026-09-07
+
+### Fixed
+
+Six defects that each put a `verified`-tier claim on screen that was not true. They share one
+cause: text taken from the repository under review — a dependency name, a workspace directory,
+an identifier, a scope segment — used as a key into an ordinary JavaScript object, which
+answers to a dozen names of its own. None was found by the test suite, which was green before
+and after every one of them.
+
+- **A dependency or lockfile finding could point at the wrong line.** The line lookup counted
+  braces inside string values as structure, so an unbalanced one collapsed its depth counter
+  and a nested key matched as though it sat at the top level. A manifest whose `scripts` held
+  an unbalanced brace could anchor a finding several lines from the entry it named. Braces are
+  now counted only outside strings. Duplicate keys remain a known limit, documented where the
+  lookup is defined.
+
+- **A dependency named `__proto__` disappeared from the review**, with nothing said about it.
+
+- **A dependency whose name collides with a built-in member** — `toString`, `constructor`,
+  `valueOf` — **was reported as changed rather than added**, and the previous version it named
+  was a JavaScript function rather than a version range.
+
+- **A workspace directory named after a built-in member was counted as a version move** rather
+  than as arriving or leaving, in a lockfile finding whose entire content is those counts.
+
+- **A guard removed from a class constructor rendered as
+  `function Object() { [native code] }`.** Every constructor is a scope segment named
+  `constructor`, so this needed no unusual code at all — any class — and it landed on
+  `guard_removed`, the highest-weighted finding urtext emits. Methods named `toString` or
+  `valueOf` did the same.
+
+- **`hasOwnProperty.call(o, k)` produced a false timing effect.** One of the oldest idioms in
+  JavaScript, and reachable since 0.5.0 taught the analyzers to read JavaScript. The finding's
+  id carried the function text into `--json`.
+
+### Changed
+
+- `CONTRIBUTING.md` records the contribution process and the test policy; `RELEASING.md`
+  records the release checklist, including the two steps that had already been missed once.
+
+## 0.5.0 — 2026-09-04
+
+### Added
+
+- **A seventh analyzer: lockfile.** Deterministic, `verified`-tier facts from
+  `package-lock.json`, checked against `package.json` and against its own previous state. Runs
+  on every review, `--no-llm` included.
+
+  A lockfile the manifest disagrees with is the finding that matters most: `npm ci` refuses to
+  install from a manifest and lockfile that disagree, so it ranks above every dependency finding
+  from the manifest itself. A resolved version — what a clean install actually gets, as opposed
+  to the range package.json declares — is its own finding, separate from a declared-range
+  change, and a dev-map resolved change still scores below the same change in a runtime map. A
+  root `version` field left stale after a manifest bump is reported alongside citation rot,
+  since nothing installs differently. Everything else that moved in the transitive tree —
+  arrivals, departures, and version changes — is counted in one finding that never outranks a
+  finding naming an actual problem, however large the count.
+
+  A lockfile that fails to parse becomes one warning naming the file and side, and the rest of
+  the review's findings survive; a nested lockfile pairs with its sibling `package.json` the
+  same way the dependencies analyzer already does for nested manifests. An npm-6-era lockfile
+  with no root package entry produces its own warning — `package-lock.json has no root package
+  entry, so its dependencies were not checked against package.json.` — since there is nothing
+  recorded in that older format to check the manifest's ranges against.
+
+- **JavaScript, read by the analyzers that already read this project's TypeScript.** Guards,
+  effects, and citations read `.js`, `.mjs`, `.cjs` and `.jsx` unconditionally, the same as
+  `.ts`, `.tsx`, `.mts` and `.cts` — each builds its own source file and never consults a
+  compiler option. Surface and blast radius read those same JavaScript extensions only when
+  the project's own `tsconfig.json` sets `allowJs` or `checkJs`, since both need the type
+  checker rather than a file either can parse on its own. Citations also checks comments in
+  `.mts` and `.cts` for the first time, closing a gap those two extensions carried on their
+  own.
+
+  A changed file whose first line is long enough that a tool plainly wrote it — bundler
+  output and the like — is skipped by every analyzer that would otherwise read it, and every
+  surface now says so when one is skipped: the terminal, HTML, Markdown, and PDF reports each
+  gain a line naming the file, and `--json` gains `coverage.generatedFiles` and
+  `coverage.generatedNote`.
+
+  A deleted `.mjs` earns the same disclosure a deleted `.ts` always has: its exports,
+  callers, and guards go unexamined, and only the effect that vanished with the file, if
+  any, is reported. See the breaking change below: the `--json` key that reports this was
+  renamed to carry both languages honestly.
+
+### `--json` additions
+
+- `coverage.generatedFiles` (always present, empty included) and `coverage.generatedNote`.
+
+### `--json` breaking change
+
+- `coverage.deletedTypeScriptFiles` is renamed to `coverage.deletedSourceFiles`. The array
+  now lists deleted JavaScript files alongside deleted TypeScript ones, and the old name
+  would have been a false claim about its own contents — the same defect class this release
+  closes in the analyzers themselves. A consumer reading the old key gets `undefined`.
+
+## 0.4.0 — 2026-09-02
+
+### Added
+
+- **A sixth analyzer: dependencies.** Deterministic, `verified`-tier facts from
+  `package.json` — an entry added, removed, or version-changed, in any of the four dependency
+  maps. Runs on every review, `--no-llm` included, so unlike the intent-gap index it lands in
+  the GitHub Action's default keyless path.
+
+  Runtime maps outrank dev: a change to `dependencies` or `peerDependencies` scores above the
+  same change to `devDependencies`, because dev churn is constant and the runtime entry is
+  what ships to every consumer. A renamed workspace resolves its manifest's old path, so a
+  directory move produces no findings rather than a screen of false additions; an unparseable
+  manifest becomes one warning naming the file and side, and the other manifests' facts
+  survive. Findings report the manifest's declared constraints only — within a range, the
+  lockfile decides what actually resolves, and every report says so once when dependency
+  findings are present.
+
+  A brand-new workspace whose `package.json` is untracked is invisible, as all untracked
+  files are to `git diff`; the report's untracked-files count covers it.
+
 ## 0.3.0 — 2026-08-31
 
 Two disclosures. Both answer the same question from opposite sides: what did this review
