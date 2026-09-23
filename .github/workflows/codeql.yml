@@ -57,6 +57,6 @@ jobs:
       # trades precision for recall, and a security report nobody trusts
       # enough to read is the failure mode this repository is built against.
       - name: Analyze
-        uses: github/codeql-action/analyze@486fec2a3ea2626afcd8c7e9208b4f515078dd7e # codeql-bundle-v2.26.4
+        uses: github/codeql-action/analyze@41a4b9a4cd40615c0165f4e0213d0216d236e1fe # codeql-bundle-v2.26.4
         with:
           category: "/language:javascript-typescript"
