@@ -49,7 +49,7 @@ jobs:
       # first, so there is no autobuild step here. Splitting it into a
       # matrix would analyze the same files twice.
       - name: Initialize
-        uses: github/codeql-action/init@486fec2a3ea2626afcd8c7e9208b4f515078dd7e # codeql-bundle-v2.26.4
+        uses: github/codeql-action/init@ee07b503f465bcf3338b6e4807a36789e3106f4b # codeql-bundle-v2.26.4
         with:
           languages: javascript-typescript
 
